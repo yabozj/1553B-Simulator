@@ -1,0 +1,1 @@
+This project is a simulator for 1553B protocol. Based on the BU-61580 protocol card, this simulator has implemented all features which 1553B refrences require, include 10 different message types, dual-channel and interrupt mechanism. Moreover, this simulator can inject with test script, which make automation test possible.
