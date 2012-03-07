@@ -1,0 +1,5 @@
+BM
+R	0x0003	0x0001 //Reg::startResetReg 
+R	0x0001	0x4000 //Reg::configReg_1 
+M	0x0100	0x0000 //Stack pointer
+R	0x0003	0x0002 //Reg::startResetReg 
