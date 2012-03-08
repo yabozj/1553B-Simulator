@@ -3,7 +3,7 @@
 #include "reg.h"
 #include "mem.h"
 #include "simbus.h"
-
+#include "transException.h"
 #define BC_STACK_A_ADDR 0
 #define BC_STACK_A_LEN 0X0100
 #define BC_STACK_POINTER_A_ADDR 0X0100
@@ -33,9 +33,10 @@ enum msgtype{BC_RT,RT_RT,BCAST,RT_RT_BCAST,MODE_CODE,INVALID_TYPE,MODE_CODE_BCAS
 
 
 
-class SimBC:public Reg, public Mem
+class SimBC:public Reg, public Mem, public Exception1553B
 {
 private:
+	SimBC *m_bcBackUp;
 	Bus m_busChannelA;
 	Bus m_busChannelB;
 
@@ -62,14 +63,19 @@ private:
 	UINT16 m_bcCurrentIdleTime;
 	UINT16 m_bcCurrentFrameTimeConsuming;
 
-	
+	UINT16 m_bcProcessedMsgCount;
 
 public:
 	SimBC(void);
 	SimBC(char *fileName);
+	~SimBC();
+	UINT16 bcDump(int len, void * buffAddr);
+	void bcRestore();
+	void bcSave();
 	UINT32 OnData(UINT32, void *);
 	virtual UINT16 memDump();
 	virtual INT16 initRegAddress(void);
+	virtual void genIRQ(void);
 	void bcStep(void);
 	UINT16 bcStratMsg(void);
 	UINT16 bcEndMsg(void);
@@ -102,9 +108,9 @@ public:
 
 	void bcSetBus(UINT16 type,UINT16 time,UINT16 data,UINT16 isFull);
 
-
-	
-
+	virtual UINT16 memWrite(UINT16, UINT16);
+	struct TransException checkIfException();
+	UINT32 CheckRecvHook(UINT32 len,void *recvData);
 	
 };
 

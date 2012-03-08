@@ -28,11 +28,12 @@ SimBC::SimBC(void)
 	m_currentRetryCount = 0;
 	m_bcFrameCountA = 0;
 	m_bcFrameCountB = 0;
+	m_bcProcessedMsgCount = 0;
 	for(int i = 0; i < MEMSIZE; i++)
 	{
 		Mem::mem[i] = 0;
 	}
-
+	m_bcBackUp = NULL;
 }
 SimBC::SimBC(char *fileName)
 {
@@ -41,7 +42,38 @@ SimBC::SimBC(char *fileName)
 	*this = *bc;
 	delete bc;
 	bc = NULL;
+	m_bcBackUp = NULL;
+}
 
+SimBC::~SimBC()
+{
+	if(m_bcBackUp) 
+	{
+		m_bcBackUp->m_bcBackUp = NULL;
+		delete m_bcBackUp;
+		m_bcBackUp = NULL;
+	}
+}
+
+void SimBC::bcRestore()
+{
+	if (m_bcBackUp)
+	{
+		*this = *m_bcBackUp;
+	}
+	
+}
+
+void SimBC::bcSave()
+{
+	if (m_bcBackUp)
+	{
+		*m_bcBackUp = *this;
+	}
+	else {
+		m_bcBackUp = new SimBC;
+		*m_bcBackUp = *this;
+	}
 }
 
 INT16 SimBC::initRegAddress(void)
@@ -83,6 +115,53 @@ INT16 SimBC::initRegAddress(void)
 	Reg::regWrite[14] = NULL;
 	Reg::regWrite[15] = NULL;
 
+	return 0;
+}
+
+UINT16 SimBC::memWrite(UINT16 addr, UINT16 data) 
+{
+	
+
+	UINT16 returnVal = Mem::memWrite(addr,data);
+	if(Reg::configReg_1 & 0x2000) 
+	{
+		if(addr == BC_MSG_CNT_B_ADDR)
+			llogInfo("BC MsgB","Msg Count : %u",0xffff - data);
+	}
+	else 
+	{
+		if(addr == BC_MSG_CNT_A_ADDR)
+		llogInfo("BC MsgA","Msg Count : %u",0xffff - data);
+	}
+	return returnVal;
+}
+
+UINT16 SimBC::bcDump(int len, void * buffAddr)
+{
+	if (sizeof(bu61580_sharemem_struct) > len)
+	{
+		llogWarn("BCDump","Needs larger buffer size");
+		return 1;
+	}
+	bu61580_sharemem_struct *buffStruct = (bu61580_sharemem_struct*)buffAddr;
+	for(int i = 0; i <= 0xf; i++)
+	{
+		if (Reg::regRead[i])
+		{
+			buffStruct->reg[i] = (this->*Reg::regRead[i])();
+		}
+		else
+		{
+			buffStruct->reg[i] = 0;
+		}
+		
+	}
+	for (int i = 0; i<= 0xfff; i++)
+	{
+		buffStruct->mem[i] = Mem::mem[i];
+	}
+	
+	
 	return 0;
 }
 
@@ -160,6 +239,7 @@ void SimBC::bcStep(void)
 			{
 				if (!m_bcIsRetrying)
 				{
+					
 					bcStratMsg();
 				}
 				bcWordTransfer();// After execute this function,m_bcCurrentMsgCycCount will be the right value, and m_bcCurrentMsgCyc will be 1.
@@ -171,6 +251,7 @@ void SimBC::bcStep(void)
 			if ((m_bcIsRetrying && m_bcCurrentMsgRetryCyc && m_bcCurrentMsgRetryCyc == m_bcCurrentMsgCycCount) || (m_bcCurrentMsgCyc && m_bcCurrentMsgCyc == m_bcCurrentMsgCycCount)) 
 			{
 				bcEndMsg();
+				
 			}
 		}
 		else //It is not the right time to transfer data
@@ -326,6 +407,8 @@ bool SimBC::bcIsRightTimeToStartMSG()
 
 UINT16 SimBC::bcStratMsg(void) 
 {
+	llogInfo("MSG Begin       ","=============================================");
+	genIRQ();
 	m_currentRetryCount = 0;
 	m_bcCurrentMsgTimeConsuming = 0;
 	m_bcCurrentIdleTime = 0;
@@ -346,6 +429,7 @@ UINT16 SimBC::bcStratMsg(void)
 
 UINT16 SimBC::bcEndMsg(void)
 {
+	m_bcProcessedMsgCount ++;
 	//Current active area is b
 	if (Reg::configReg_1 & 0x2000) 
 	{
@@ -364,6 +448,9 @@ UINT16 SimBC::bcEndMsg(void)
 	}
 	m_bcCurrentMsgCyc = 0;
 	m_bcCurrentMsgCycCount = 0;
+	m_bcIsRetrying = 0;
+	m_bcCurrentMsgRetryCyc = 0;
+	m_currentRetryCount = 0;
 	if(Reg::startResetReg & 0x0040)
 	{
 		Reg::isHalted = true;
@@ -372,6 +459,8 @@ UINT16 SimBC::bcEndMsg(void)
 	{
 
 	}
+	genIRQ();
+	llogInfo("MSG End         ","=============================================\n");
 	return 0;
 }
 
@@ -393,6 +482,40 @@ UINT16 SimBC::bcAnalyzeMsg(void)
 	UINT16 timeRegValue = Reg::timeTagReg;
 	memWrite(Reg::cmdStackPtrReg + 1, timeRegValue);
 	memWrite(Reg::cmdStackPtrReg, blockStatusWord);
+
+	m_msgCmdWord = memRead(m_msgBlockAddr + 1);
+
+
+	UINT16 address=m_msgCmdWord>>11;
+	UINT16 wordCount_modeCode=m_msgCmdWord&0X001F;
+	UINT16 t_r=m_msgCmdWord&0X0400;
+	UINT16 subAddress=(m_msgCmdWord>>5)&0X001F;
+	if (subAddress == 0 || subAddress == 31)
+	{
+		
+		blockCtrlWord &= 0xFFF8;
+		blockCtrlWord |= 0x0004;
+		if (address == 31 )
+		{
+			blockCtrlWord |= 0x0002;
+			
+		}
+		
+	}
+	else if (address == 31)
+	{
+		if (!t_r)
+		{
+			blockCtrlWord &= 0xFFF8;
+			blockCtrlWord |= 0x0002;
+		}
+		
+			
+	}
+	memWrite(m_msgBlockAddr,blockCtrlWord);
+	Reg::bcCtrlWordReg = blockCtrlWord;
+
+
 	//Analyze the msg type
 	switch(blockCtrlWord & 0X0007) 
 	{
@@ -400,7 +523,7 @@ UINT16 SimBC::bcAnalyzeMsg(void)
 			{
 				//At least, it should be 2;
 				m_bcCurrentMsgCycCount = 2;
-				m_msgCmdWord = memRead(m_msgBlockAddr + 1);
+				
 				if (m_msgCmdWord & 0X0001F) 
 				{
 					m_bcCurrentMsgCycCount += (m_msgCmdWord & 0x0001f);//Count of data
@@ -417,7 +540,7 @@ UINT16 SimBC::bcAnalyzeMsg(void)
 		case RT_RT: 
 			{
 				m_bcCurrentMsgCycCount = 4;
-				m_msgCmdWord = memRead(m_msgBlockAddr + 1); 
+				
 				m_msgSecondCmdWord = memRead(m_msgBlockAddr + 2);
 				if (m_msgCmdWord & 0X0001F) 
 				{
@@ -435,7 +558,7 @@ UINT16 SimBC::bcAnalyzeMsg(void)
 		case BCAST: 
 			{		
 				m_bcCurrentMsgCycCount = 1;
-				m_msgCmdWord = memRead(m_msgBlockAddr + 1);
+				
 				if (m_msgCmdWord & 0X0001F) 
 				{
 					m_bcCurrentMsgCycCount += (m_msgCmdWord & 0x0001f);//Count of data
@@ -452,7 +575,7 @@ UINT16 SimBC::bcAnalyzeMsg(void)
 		case RT_RT_BCAST: 
 			{
 				m_bcCurrentMsgCycCount  = 3;
-				m_msgCmdWord = memRead(m_msgBlockAddr + 1);//This is broadcast command
+				
 				m_msgSecondCmdWord = memRead(m_msgBlockAddr + 2);
 				if (m_msgCmdWord & 0X0001F) 
 				{
@@ -469,7 +592,7 @@ UINT16 SimBC::bcAnalyzeMsg(void)
 			}
 		case MODE_CODE: 
 			{	
-				m_msgCmdWord = memRead(m_msgBlockAddr + 1);
+				
 				//Loop back ans wait status word
 				m_bcCurrentMsgCycCount = 2;
 				//Has a data word
@@ -486,7 +609,7 @@ UINT16 SimBC::bcAnalyzeMsg(void)
 			}
 		case MODE_CODE_BCAST: 
 			{
-				m_msgCmdWord = memRead(m_msgBlockAddr + 1);
+				
 				//Loop back
 				m_bcCurrentMsgCycCount = 1;
 				if ((m_msgCmdWord & 0x001f) >= 16) 
@@ -598,7 +721,7 @@ UINT16 SimBC::bcProcessStatusWord(UINT16 statusWord, UINT16 commandWord)
 		if(isError || isBusy)
 		{
 			llogWarn("BC","Responded RT is busy or error!");
-			llogWarn("BC","BC will retry");
+			
 			//Enhance mode and retry enabled
 			if((Reg::configReg_3 & 0x8000) && (Reg::configReg_1 &0x0010))
 			{
@@ -609,7 +732,7 @@ UINT16 SimBC::bcProcessStatusWord(UINT16 statusWord, UINT16 commandWord)
 					UINT16 maxRetryCount = (Reg::configReg_1 & 0x0008)? 2:1;
 					if(m_currentRetryCount < maxRetryCount)
 					{
-						llogInfo("BC","BC will retry");
+						llogInfo("BC","maxRetryCount=%u,and m_currentRetryCount=%u,BC will retry",maxRetryCount,m_currentRetryCount);
 						m_bcIsRetrying = true;
 						m_currentRetryCount ++;
 						m_bcCurrentMsgRetryCyc = 0;
@@ -631,9 +754,10 @@ UINT16 SimBC::bcProcessStatusWord(UINT16 statusWord, UINT16 commandWord)
 				return 1;
 
 			}
-			bcEndMsg();
-			llogWarn("BC","Skip this message to next message");
+			
+			llogWarn("BC","m_currentRetryCount exceeds maxRetryCount or doesn't allow retry,Skip this message to next message");
 			m_currentRetryCount = 0;
+			bcEndMsg();
 			return 1;
 		}
 		llogDebug("BC","Responded status word OK");
@@ -652,7 +776,7 @@ UINT16 SimBC::bcProcessStatusWord(UINT16 statusWord, UINT16 commandWord)
 				UINT16 maxRetryCount = (Reg::configReg_1 & 0x0008)? 2:1;
 				if(m_currentRetryCount < maxRetryCount)
 				{
-					llogInfo("BC","BC will retry");
+					llogInfo("BC","maxRetryCount=%u,and m_currentRetryCount=%u,BC will retry",maxRetryCount,m_currentRetryCount);
 					m_bcIsRetrying = true;
 					m_currentRetryCount ++;
 					m_bcCurrentMsgRetryCyc = 0;
@@ -674,9 +798,10 @@ UINT16 SimBC::bcProcessStatusWord(UINT16 statusWord, UINT16 commandWord)
 			return 1;
 
 		}
-		bcEndMsg();
-		llogWarn("BC","Skip this message to next message");
+		
+		llogWarn("BC","m_currentRetryCount exceeds maxRetryCount or doesn't allow retry,Skip this message to next message");
 		m_currentRetryCount = 0;
+		bcEndMsg();
 		return 1;
 	}
 	return 0;
@@ -745,7 +870,7 @@ UINT16 SimBC::bcBCRTTransfer(void)
 	{ 
 		
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)	
 		{
@@ -829,7 +954,7 @@ UINT16 SimBC::bcRTBCTransfer(void)
 	else if ((m_bcIsRetrying && m_bcCurrentMsgRetryCyc == 3) || m_bcCurrentMsgCyc == 3) //Status word
 	{ 
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)
 		{
@@ -861,7 +986,7 @@ UINT16 SimBC::bcRTBCTransfer(void)
 	else if ((m_bcIsRetrying && m_bcCurrentMsgRetryCyc <= (dataCount + 3)) || m_bcCurrentMsgCyc <= (dataCount + 3)) //Data word
 	{
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)
 		{
@@ -954,7 +1079,7 @@ UINT16 SimBC::bcRTRTTransfer(void)
 	else if ((m_bcIsRetrying && m_bcCurrentMsgRetryCyc == 4) || m_bcCurrentMsgCyc == 4) //Trans status word
 	{
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)
 		{
@@ -984,7 +1109,7 @@ UINT16 SimBC::bcRTRTTransfer(void)
 	else if ((m_bcIsRetrying && m_bcCurrentMsgRetryCyc < (dataCount + 5)) || m_bcCurrentMsgCyc < (dataCount + 5)) //Data word
 	{
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)
 		{
@@ -1020,7 +1145,7 @@ UINT16 SimBC::bcRTRTTransfer(void)
 	else if ((m_bcIsRetrying && m_bcCurrentMsgRetryCyc == (dataCount + 5)) || m_bcCurrentMsgCyc == (dataCount + 5)) //Recv status word
 	{ 
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)
 		{
@@ -1096,7 +1221,7 @@ UINT16 SimBC::bcModeCodeNoDataTransfer(void)
 	else if((m_bcIsRetrying && m_bcCurrentMsgRetryCyc == 3) || m_bcCurrentMsgCyc == 3) 
 	{
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)
 		{
@@ -1170,7 +1295,7 @@ UINT16 SimBC::bcModeCodeTXDataTransfer(void)
 	else if((m_bcIsRetrying && m_bcCurrentMsgRetryCyc == 3) || m_bcCurrentMsgCyc == 3) 
 	{
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)
 		{
@@ -1201,7 +1326,7 @@ UINT16 SimBC::bcModeCodeTXDataTransfer(void)
 	else if((m_bcIsRetrying && m_bcCurrentMsgRetryCyc == 4) || m_bcCurrentMsgCyc == 4)  
 	{
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)
 		{
@@ -1273,7 +1398,7 @@ UINT16 SimBC::bcModeCodeRXDataTransfer(void)
 	else if((m_bcIsRetrying && m_bcCurrentMsgRetryCyc == 4) || m_bcCurrentMsgCyc == 4) 
 	{
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)
 		{
@@ -1414,7 +1539,7 @@ UINT16 SimBC::bcRTBroadcastTransfer(void)
 	else if ((m_bcIsRetrying && m_bcCurrentMsgRetryCyc == 4) || m_bcCurrentMsgCyc ==  4) 
 	{
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)
 		{
@@ -1445,7 +1570,7 @@ UINT16 SimBC::bcRTBroadcastTransfer(void)
 	else if ((m_bcIsRetrying && m_bcCurrentMsgRetryCyc <= (dataCount + 4)) || m_bcCurrentMsgCyc <= (dataCount + 4)) 
 	{
 		UINT16 busData[4];
-		UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+		UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 		if (!retValue)
 		{
@@ -1555,6 +1680,7 @@ UINT16 SimBC::bcModeCodeDataBroadcastTransfer(void)
 UINT16 SimBC::bcRecvImproperWord()
 {
 	llogError("BC","Received a improper word"); 
+	genIRQ();
 	//Enhance mode and retry enabled
 	if((Reg::configReg_3 & 0x8000) && (Reg::configReg_1 &0x0010))
 	{
@@ -1565,7 +1691,7 @@ UINT16 SimBC::bcRecvImproperWord()
 			UINT16 maxRetryCount = (Reg::configReg_1 & 0x0008)? 2:1;
 			if(m_currentRetryCount < maxRetryCount)
 			{
-				llogInfo("BC","BC will retry");
+				llogInfo("BC","maxRetryCount=%u,and m_currentRetryCount=%u,BC will retry",maxRetryCount,m_currentRetryCount);
 				m_bcIsRetrying = true;
 				m_currentRetryCount ++;
 				m_bcCurrentMsgRetryCyc = 0;
@@ -1586,15 +1712,16 @@ UINT16 SimBC::bcRecvImproperWord()
 		return 1;
 
 	}
-	bcEndMsg();
-	llogWarn("BC","Skip this message to next message");
+	
+	llogWarn("BC","m_currentRetryCount exceeds maxRetryCount or doesn't allow retry,Skip this message to next message");
 	m_currentRetryCount = 0;
+	bcEndMsg();
 	return 1;
 }
 UINT16 SimBC::bcRecvTimeout()
 {
 	llogInfo("BC","Waiting Recv timeout!");
-
+	genIRQ();
 	Reg::timeRecorder += 15;//For Loop test, Reg::timeRecorder will not increase 
 	updateTimeReg();
 	m_bcCurrentMsgTimeConsuming += 15;
@@ -1610,11 +1737,16 @@ UINT16 SimBC::bcRecvTimeout()
 			UINT16 maxRetryCount = (Reg::configReg_1 & 0x0008)? 2:1;
 			if(m_currentRetryCount < maxRetryCount)
 			{
-				llogInfo("BC","BC will retry");
+				llogInfo("BC","maxRetryCount=%u,and m_currentRetryCount=%u,BC will retry",maxRetryCount,m_currentRetryCount);
 				m_bcIsRetrying = true;
 				m_currentRetryCount ++;
 				m_bcCurrentMsgRetryCyc = 0;
 				return 0;
+			}
+			else
+			{
+				llogInfo("BC","maxRetryCount=%u,and m_currentRetryCount=%u,BC will retry",maxRetryCount,m_currentRetryCount);
+				
 			}
 		}
 	}
@@ -1633,9 +1765,10 @@ UINT16 SimBC::bcRecvTimeout()
 		return 1;
 
 	}
-	bcEndMsg();
-	llogWarn("BC","Skip this message to next message");
+	
+	llogWarn("BC","m_currentRetryCount exceeds maxRetryCount or doesn't allow retry,Skip this message to next message");
 	m_currentRetryCount = 0;
+	bcEndMsg();
 	return 1;
 }
 
@@ -1752,4 +1885,66 @@ void SimBC::bcSetBus(UINT16 type,UINT16 time,UINT16 data,UINT16 isFull)
 	{
 		m_busChannelA.setBusData(type,time,data,isFull);
 	}
+}
+
+struct TransException SimBC::checkIfException()
+{
+	struct TransException transExcep = {0,0,TimeOutException,FALSE};
+
+	UINT16 msgCount = m_bcProcessedMsgCount + 1;
+	for (UINT16 i = 0; i < 64; i++)
+	{
+		struct TransException tempExcep = Exception1553B::m_exceptionArray[i];
+		if (tempExcep.isError && tempExcep.messageIndex == msgCount)
+		{
+			if (m_bcIsRetrying)
+			{
+				if(tempExcep.messageCycCount == m_bcCurrentMsgRetryCyc) 
+				{
+					transExcep = tempExcep;
+					Exception1553B::m_exceptionArray[i].isError = FALSE;
+					break;
+				}
+			}
+			else 
+			{
+				if(tempExcep.messageCycCount == m_bcCurrentMsgCyc)
+				{
+					transExcep = tempExcep;
+					Exception1553B::m_exceptionArray[i].isError = FALSE;
+					break;
+				}
+			}
+		}
+	}
+
+	return transExcep;
+}
+
+UINT32 SimBC::CheckRecvHook(UINT32 len,void *recvData)
+{
+	struct TransException  transExcep = checkIfException();
+	if (transExcep.isError)
+	{
+		if (transExcep.exceptionType == TimeOutException)
+		{		
+			return 1;
+
+		}
+		else 
+		{
+			(*((UINT16*)recvData + 0)) = DATA_TYPE_UNDEFINED_WORD;
+			return 0;
+		}
+	}
+	else 
+	{
+		return ::CheckRecv(len,recvData);
+	}
+	
+}
+
+void SimBC::genIRQ(void)
+{
+	GenIRQ();
 }

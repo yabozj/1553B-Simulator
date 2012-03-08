@@ -26,7 +26,9 @@ typedef int INT32;
 #endif
 
 
+
 #ifdef WIN32  
+#include <windows.h>
 #ifndef UINT64
 typedef unsigned __int64 UINT64;
 #endif
@@ -42,6 +44,17 @@ typedef __int64 INT64;
 #ifndef INT64
 #define INT64 signed long long
 #endif
+#ifndef BOOL
+typedef int BOOL;
+#endif
+
+#ifndef TRUE
+#define TRUE 1
+#endif
+
+#ifndef FALSE
+#define FALSE 0
+#endif
 #endif
 
 
@@ -52,5 +65,8 @@ typedef __int64 INT64;
 typedef void (*sim61580irq)(); 
 typedef UINT32 (*pfun_RecvCheck)(UINT32 len,void *recvData);
 
-
+typedef struct {
+	UINT16  reg[0x10];
+	UINT16  mem[0x1000];
+} bu61580_sharemem_struct;
 #endif

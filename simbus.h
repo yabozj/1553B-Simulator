@@ -4,6 +4,7 @@
 #define DATA_TYPE_COMMAND_WORD 0
 #define DATA_TYPE_DATA_WORD 1
 #define DATA_TYPE_STATUS_WORD 2
+#define DATA_TYPE_UNDEFINED_WORD 8
 class SimBC;
 class SimRT;
 class SimMT;
@@ -24,4 +25,5 @@ private:
 //extern UINT32 CheckRecv(UINT32 len,void *recvData);
 extern sim61580irq GenIRQ;
 extern pfun_RecvCheck CheckRecv;
+
 #endif

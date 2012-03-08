@@ -144,6 +144,7 @@ public:
 	UINT16 rtBITWordReg_read(void);
 
 	virtual INT16 initRegAddress(void) = 0;
+	virtual void genIRQ(void)=0;
 };
 
 

@@ -5,6 +5,7 @@
 #include "reg.h"
 #include "mem.h"
 #include "simbus.h"
+#include "transException.h"
 
 #define RT_STACK_A_ADDR 0
 #define RT_STACK_A_LEN 0X0100
@@ -114,15 +115,16 @@
 enum{vectorWordModeCode=16,lastCmdWordModeCode=18,BITWordModeCode=19};
 
 
-class SimRT:public Reg, public Mem
+class SimRT:public Reg, public Mem, public Exception1553B
 {
 private:
+	SimRT *m_rtBackUp;
 	Bus m_busChannelA;
 	Bus m_busChannelB;
 
 
 	
-	
+	UINT16 m_rtDataIndex;
 	UINT16 m_rtCurrentMsgCycCount;
 
 	UINT16 m_rtCurrentMsgCyc;
@@ -134,18 +136,24 @@ private:
 	UINT16 m_rtAddress;
 	UINT16 m_mLastStatusReg;	
 
+	UINT16 m_rtProcessedMsgCount;
 	char rtDescription[32];
 	
 
 public:
 	SimRT(UINT16 addr);
 	SimRT(UINT16 addr,char *fileName);
+	~SimRT();
+	void rtRestore();
+	void rtSave();
+	UINT16 rtDump(int len, void * buffAddr);
 	UINT16 rtAddress()
 	{
 		return m_rtAddress;
 	}
 	virtual UINT16 memDump();
 	virtual INT16 initRegAddress(void);
+	virtual void genIRQ(void);
 	UINT16 RTStep(void);
 	UINT16 RTReceiveCMD();	
 	UINT16 RTSingleWordTransfer();
@@ -175,7 +183,8 @@ public:
 
 	UINT16 initForTest();
 	UINT16 configReg_5_write(UINT16 data);
-
+	struct TransException checkIfException();
+	UINT32 CheckRecvHook(UINT32 len,void *recvData);
 };
 
 

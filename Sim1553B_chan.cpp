@@ -3,7 +3,7 @@
 
 #include "stdafx.h"
 #include <string.h>
-
+#include "transException.h"
 #include "simbc.h"
 #include "simmt.h"
 #include "simrt.h"
@@ -25,10 +25,23 @@ bool hasRead = false;
 bool hasData = false;
 
 SimBC *bc = NULL;
+
 SimRT *rt = NULL;
+
 SimMT *mt = NULL;
+
 UINT16 RTBCMTMode = 4;//Invalid mode
 UINT16 rt_address = 33;//NOTE this is not a valid address
+extern "C"  UINT32 Write(UINT64 timestamp, UINT32 Addr, void *data);
+extern "C"  void Init(int argc,const char *argv[],pfun_RecvCheck fromSyn,sim61580irq irq);
+extern "C"  void Step(void);
+extern "C"  void Exit(void);
+extern "C"  UINT32 Read(UINT64 timestamp, UINT32 Addr, void *data);
+extern "C"  UINT32 OnData(UINT32 len, void *data);
+extern "C"  void SaveState();
+extern "C"  void RestoreState();
+extern "C"  void AddException(int msgIndex,int cycAndType);
+extern "C"  UINT16 InfoDump(int len, void * buffAddr);
 
 char * cStrTrim(char *&str, int len)
 {
@@ -91,7 +104,7 @@ UINT16 loadConfiguration(const char * filePath,bool isInternalTest)
 			RTBCMTMode = 1;
 			int rtAddress = 33;
 			sscanf(dataPtr + 2,"%x",&rtAddress);
-			if(rtAddress && rtAddress < 32)
+			if(rtAddress >= 0 && rtAddress < 32)
 			{
 				rt = new SimRT(rtAddress);
 			}
@@ -139,37 +152,29 @@ UINT16 loadConfiguration(const char * filePath,bool isInternalTest)
 			int address = 0;
 			int data = 0;
 			sscanf(dataPtr,"%c%x%x",&mode,&address,&data);
-			if(mode == 'R')
+
+			if((mode == 'M') ||(mode == 'R'))
 			{
-				if(RTBCMTMode == 0 && bc)//BC
+				if (mode == 'M')
 				{
-					bc->regWriteToAddr(address,data);
+					llogDebug("Init","Mem 0x%x : 0x%2x",address,data);
+					address |= 0XF000;
 				}
-				else if(RTBCMTMode == 1 && rt)//RT
+				else
 				{
-					rt->regWriteToAddr(address,data);
+					llogDebug("Init","Reg 0x%x : 0x%2x",address,data);
 				}
-				else if(RTBCMTMode == 2 && mt)//MT
+				if((RTBCMTMode == 0 && bc)||//BC
+					(RTBCMTMode == 1 && rt)||//RT
+					RTBCMTMode == 2 && mt)//MT
 				{
-					mt->regWriteToAddr(address,data);
+
+					Write(0,address,&data);
 				}
-				llogDebug("Init","Reg 0x%x : 0x%2x",address,data);
 			}
-			else if(mode == 'M')
+			else if (mode == 'E')
 			{
-				if(RTBCMTMode == 0 && bc)//BC
-				{
-					bc->memWrite(address,data);
-				}
-				else if(RTBCMTMode == 1 && rt)//RT
-				{
-					rt->memWrite(address,data);
-				}
-				else if(RTBCMTMode == 2 && mt)//MT
-				{
-					mt->memWrite(address,data);
-				}
-				llogDebug("Init","Mem 0x%x : 0x%2x",address,data);
+				AddException(address,data);
 			}
 
 			dataPtr = pdef;
@@ -193,7 +198,11 @@ UINT16 loadConfiguration(const char * filePath,bool isInternalTest)
 
 
 
-
+void internalGenIRQ()
+{
+	llogDebug("IRQ","Internal IRQ");
+	return;
+}
 
 UINT32 internalCheckRecv(UINT32 len,void *recvData)
 {
@@ -219,6 +228,10 @@ UINT32 internalCheckRecv(UINT32 len,void *recvData)
 	return 1;
 	
 }
+
+
+
+
 extern "C"  void Init(int argc,const char *argv[],pfun_RecvCheck fromSyn,sim61580irq irq)
 {
 
@@ -322,13 +335,13 @@ extern "C"  UINT32 Write(UINT64 timestamp, UINT32 Addr, void *data)
 		if (Addr&0XF000)//mem
 		{
 			realAddr=Addr&0XFFF;
-			llogInfo("Write","Mem 0x%x:0x%x",realAddr,dataU16);
+			//llogInfo("Write","Mem 0x%x:0x%x",realAddr,dataU16);
 			return bc->memWrite(realAddr,dataU16);
 		}
 		else
 		{
 			realAddr=Addr&0XF;
-			llogInfo("Write","Reg 0x%x:0x%x",realAddr,dataU16);
+			//llogInfo("Write","Reg 0x%x:0x%x",realAddr,dataU16);
 			return bc->regWriteToAddr(realAddr,dataU16);
 		}
 
@@ -381,17 +394,91 @@ extern "C"  UINT32 OnData(UINT32 len, void *data)
 
 extern "C"  void SaveState()
 {
+	if(RTBCMTMode == 0 && bc)//BC
+	{
+		bc->bcSave();
+	}
+	else if(RTBCMTMode == 1 && rt)//RT
+	{
+		rt->rtSave();
+	}
+	else if(RTBCMTMode == 2 && mt)//MT
+	{
+		mt->mtSave();
+	}
 	return; 
 }
 
 extern "C"  void RestoreState()
 {
+	if(RTBCMTMode == 0 && bc)//BC
+	{
+		bc->bcRestore();
+		
+	}
+	else if(RTBCMTMode == 1 && rt)//RT
+	{
+		rt->rtRestore();
+	
+	}
+	else if(RTBCMTMode == 2 && mt)//MT
+	{
+		mt->mtRestore();
+	}
 	return; 
 }
 
+extern "C"  void AddException(int msgIndex,int typeAndCyc)
+{
+	int cyc = typeAndCyc&0xFF;
+	int type = ((typeAndCyc&0xFF00) >> 8)%2;
+	struct TransException excep = {msgIndex,cyc,type?DataTypeUnMatchException:TimeOutException,TRUE};
+	if(RTBCMTMode == 0 && bc)//BC
+	{
+
+		bc->addException(excep);
+	}
+	else if(RTBCMTMode == 1 && rt)//RT
+	{
+		rt->addException(excep);
+	}
+	else if(RTBCMTMode == 2 && mt)//MT
+	{
+		mt->addException(excep);
+	}
+	llogDebug("Init","Add Exception Msg Index:0x%2x, CYC:0x%2x,Type: %s",msgIndex,cyc,type?"DataTypeUnMatchException":"TimeOutException");
+
+}
+
+UINT16 InfoDump(int len, void * buffAddr)
+{
+	if(RTBCMTMode == 0 && bc)//BC
+	{
+
+		return bc->bcDump(len,buffAddr);
+	}
+	else if(RTBCMTMode == 1 && rt)//RT
+	{
+		return rt->rtDump(len,buffAddr);
+	}
+	else if(RTBCMTMode == 2 && mt)//MT
+	{
+		return mt->mtDump(len,buffAddr);
+	}	
+	return 0;
+}
 
 int _tmain(int argc, _TCHAR* argv[])
 {	
+
+/*
+	UINT32 x=1000;
+	void * ppp = (void*)&x;
+
+	UINT16 xx = *(UINT16*)ppp;
+	llogInfo("TEST","%u",xx);
+	return 0;
+*/
 	llogDebug("123","message %d",123);
 	
 	char *testStr = "R      0x1234    0x123456       ";
@@ -405,20 +492,34 @@ int _tmain(int argc, _TCHAR* argv[])
 	Write(0,0xffffff,buff);
 	
 	CheckRecv = internalCheckRecv;
+	GenIRQ = internalGenIRQ;
 	//Load BC configuration
 	SimBC internalBC("bcconfigure.txt");
+	internalBC.bcSave();
+	SimRT internalRT0(0,"rtconfigure0.txt");
+	internalRT0.rtSave();
+
 	//Load RT configuration for RT address 1
 	SimRT internalRT1(1,"rtconfigure1.txt");
+	internalRT1.rtSave();
 	//Load RT configuration for RT address 2
 	SimRT internalRT2(2,"rtconfigure2.txt");
+	internalRT2.rtSave();
 	//Load RT configuration for RT address 3
 	SimRT internalRT3(3,"rtconfigure3.txt");
+	internalRT3.rtSave();
 	//Load RT configuration for RT address 4
 	SimRT internalRT4(4,"rtconfigure4.txt");
+	internalRT4.rtSave();
 	SimMT internalMT("mtconfigure.txt");
+	internalMT.mtSave();
+
+	UINT16 count = 0;
+	UINT16 restoreCount = 0; 
 	while(1)
 	{
 		internalBC.bcStep();
+		internalRT0.RTStep();
 		internalRT1.RTStep();
 		internalRT2.RTStep();
 		internalRT3.RTStep();
@@ -426,6 +527,7 @@ int _tmain(int argc, _TCHAR* argv[])
 		internalMT.mtStep();
 		hasData = false;
 		if(1 == internalBC.OnData(sizeof(TMPBUSStructure),&buffData)		|| 
+				1 == internalRT0.OnData(sizeof(TMPBUSStructure),&buffData)	||
 				1 == internalRT1.OnData(sizeof(TMPBUSStructure),&buffData)  || 
 				1 == internalRT2.OnData(sizeof(TMPBUSStructure),&buffData)  || 
 				1 == internalRT3.OnData(sizeof(TMPBUSStructure),&buffData)  ||  
@@ -435,7 +537,35 @@ int _tmain(int argc, _TCHAR* argv[])
 			hasData = true;
 			
 		}
+		if (count > 1130)
+		{
+			count = 0;
+			restoreCount++;
+			llogInfo("Restore","Restrore ALL\n\n\n");
+#ifdef WIN32  
 
+			Sleep(2000);
+#else
+			for (int j = 0; j < 1000000; j++)
+			{
+				;
+			}
+#endif
+			internalBC.bcRestore();
+			internalRT0.rtRestore();
+			internalRT1.rtRestore();
+			internalRT2.rtRestore();
+			internalRT3.rtRestore();
+			internalRT4.rtRestore();
+			internalMT.mtRestore();
+			
+		}
+		count ++;
+		if (restoreCount > 2)
+		{
+			llogInfo("Restore","Done");
+			return 0;
+		}
 	}
 	return 0;
 }

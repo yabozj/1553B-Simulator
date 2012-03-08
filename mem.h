@@ -9,9 +9,11 @@ class Mem
 {
 protected:
 	UINT16 mem[MEMSIZE];
+	
 public:
-	UINT16 memRead(UINT16);
-	UINT16 memWrite(UINT16, UINT16);
+	
+	virtual UINT16 memRead(UINT16);
+	virtual UINT16 memWrite(UINT16, UINT16);
 	UINT16 memWriteBlock(UINT16, UINT16 *, UINT16);
 	virtual UINT16 memDump() = 0;
 };

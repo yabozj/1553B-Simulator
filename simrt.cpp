@@ -16,11 +16,15 @@ SimRT::SimRT(UINT16 addr)
 	Reg::timeRecorder = 0;
 	m_busChannelA.m_busFull = 0;
 	m_busChannelB.m_busFull = 0;
+	m_rtProcessedMsgCount = 0;
 	for(int i = 0; i < MEMSIZE; i++)
 	{
+		//The default value is 0xCDCD in VC, while in GCC, that is 0x0000
 		Mem::mem[i] = 0;
 	}
 	memset(rtDescription,0,32);
+	m_rtBackUp = NULL;
+	m_rtDataIndex = 0;
 	sprintf(rtDescription,"%s %d","RT",addr);
 
 	
@@ -32,6 +36,38 @@ SimRT::SimRT(UINT16 addr,char *fileName)
 	//SimRT::SimRT(*rt);
 	delete rt;
 	rt = NULL;
+	m_rtBackUp = NULL;
+}
+
+SimRT::~SimRT()
+{
+	if(m_rtBackUp) 
+	{
+		m_rtBackUp->m_rtBackUp = NULL;
+		delete m_rtBackUp;
+		m_rtBackUp = NULL;
+	}
+
+}
+
+void SimRT::rtRestore()
+{
+	if (m_rtBackUp)
+	{
+		*this = *m_rtBackUp;
+	}
+}
+
+void SimRT::rtSave()
+{
+	if (m_rtBackUp)
+	{
+		*m_rtBackUp = *this;
+	}
+	else {
+		m_rtBackUp = new SimRT(m_rtAddress);
+		*m_rtBackUp = *this;
+	}
 }
 
 INT16 SimRT::initRegAddress(void)
@@ -84,7 +120,7 @@ UINT16 SimRT::RTStep(void)
 		UINT16 busData[4]; 
 		
 		//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
-		if (!m_rtCurrentMsgCyc && !CheckRecv(4*sizeof(UINT16),&busData)) //CYC is 1 and the first word is command word
+		if (!m_rtCurrentMsgCyc && !CheckRecvHook(4*sizeof(UINT16),&busData)) //CYC is 1 and the first word is command word
 		{  
 			if(busData[0] == DATA_TYPE_COMMAND_WORD) //Check word type 
 			{
@@ -128,6 +164,33 @@ UINT16 SimRT::memDump()
 	return 0;
 }
 
+UINT16 SimRT::rtDump(int len, void * buffAddr)
+{
+	if (sizeof(bu61580_sharemem_struct) > len)
+	{
+		llogWarn("RTDump","Needs larger buffer size");
+		return 1;
+	}
+	bu61580_sharemem_struct *buffStruct = (bu61580_sharemem_struct*)buffAddr;
+	for(int i = 0; i <= 0xf; i++)
+	{
+		if (Reg::regRead[i])
+		{
+			buffStruct->reg[i] = (this->*Reg::regRead[i])();
+		}
+		else
+		{
+			buffStruct->reg[i] = 0;
+		}
+
+	}
+	for (int i = 0; i<= 0xfff; i++)
+	{
+		buffStruct->mem[i] = Mem::mem[i];
+	}
+	return 0;
+}
+
 UINT16 SimRT::RTReceiveCMD()
 {
 	RTCheckCMDType(m_rtCurrentMsgCmdWord);//Init the CYC count
@@ -145,6 +208,7 @@ UINT16 SimRT::RTSingleWordTransfer()
 	UINT16 mode0_3 = wordCount_modeCode & 0x0F;
 	UINT16 modeSelectiveIntAddr = 0x0108|isMyAddress|mode4|t_r;
 
+	genIRQ();
 	if(subAddress == 0 || subAddress == 31)
 	{
 		UINT16 intData = memRead(modeSelectiveIntAddr);
@@ -236,14 +300,15 @@ UINT16 SimRT::RTModeCodeWithDataTransferTX()
 			case 0X13://Transmit BIT Word
 				if (!(regStatusValue&0X0008) || !(isEnhanceMode&&(regDataForConfig4&0X4000)))
 				{
-					if (isEnhanceModeCodeHandle)
+					/*if (isEnhanceModeCodeHandle)
 					{
 						transData = memRead(RT_MODECODE_DATA_TRANSMIT_ADDR + 3);               
 					}
 					else
 					{
 						transData = memRead(stackAddr);       
-					}
+					}*/
+					transData = Reg::rtBITWordReg;
 				}               
 
 				break;
@@ -251,7 +316,7 @@ UINT16 SimRT::RTModeCodeWithDataTransferTX()
 				break;
 			}
 
-			RTUpdateLookupTable(cmd);
+			
 			//wordParse(rtDescription,DATA_TYPE_DATA_WORD,timeRegValue,transData);
 			if (Reg::rtBITWordReg & 0X0100) 
 			{
@@ -308,7 +373,7 @@ UINT16 SimRT::RTModeCodeWithDataTransferRX()
 		if(m_rtCurrentMsgCyc == 1) 
 		{
 			UINT16 busData[4];
-			UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+			UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 			//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 			if (retValue) //Recv is null
 			{
@@ -343,8 +408,7 @@ UINT16 SimRT::RTModeCodeWithDataTransferRX()
 			{
 				UINT16 stackAddr = Reg::rtDataStackAddrReg;
 				memWrite(stackAddr,currentDataWord);
-				RTUpdateLookupTable(cmd);
-
+				
 			}
 		}
 
@@ -428,6 +492,9 @@ UINT16 SimRT::RTModeCodeWithOutDataTransfer()
 
 UINT16 SimRT::RTTXTransfer()
 {
+
+
+
 	UINT16 cmd = m_rtCurrentMsgCmdWord;
 	UINT16 subAddress=(cmd>>5)&0X001F;
 	UINT16 time = Reg::timeTagReg;
@@ -450,11 +517,14 @@ UINT16 SimRT::RTTXTransfer()
 	}   
 	else if(m_rtCurrentMsgCyc > 1 && m_rtCurrentMsgCyc < m_rtCurrentMsgCycCount)
 	{
+		
 		if (!(Reg::rtStatusWordReg&0X0400) && !(memRead(m_rtMsgBlockAddr)&0X0040))
 		{
 			UINT16 stackAddr = Reg::rtDataStackAddrReg;
-			UINT16 data =  memRead(stackAddr);
-			RTUpdateLookupTable(cmd);
+			UINT16 data =  memRead(stackAddr+ m_rtDataIndex);
+
+			llogInfo("Trans","0x%x:0x%x",stackAddr + m_rtDataIndex,data);
+			
 			//wordParse(rtDescription,DATA_TYPE_DATA_WORD,time,data);
 			if (Reg::rtBITWordReg & 0X0100) {
 				
@@ -467,6 +537,7 @@ UINT16 SimRT::RTTXTransfer()
 			
 
 		}
+		m_rtDataIndex++;
 	}
 
 
@@ -488,7 +559,7 @@ UINT16 SimRT::RTRXTransfer()
 	{
 		if((regData&0X0008 && regDataForConfig3&0x8008) || (blockData&0X0040 && regDataForConfig3&0X8010))//Busy or invalid
 		{
-			UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+			UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 			//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 			if (!retValue)
 			{
@@ -499,6 +570,7 @@ UINT16 SimRT::RTRXTransfer()
 					if( commandAddress == m_rtAddress || commandAddress == 31)
 					{
 						m_rtCurrentMsgCmdWord = busData[1];
+						m_rtProcessedMsgCount --;//Trick
 						RTEndMsg();
 						RTReceiveCMD();    //Reinit the CYC count
 						RTStartMsg();
@@ -516,18 +588,19 @@ UINT16 SimRT::RTRXTransfer()
 		}
 		else
 		{
-			UINT16 retValue = CheckRecv(4*sizeof(UINT16),&busData);
+			UINT16 retValue = CheckRecvHook(4*sizeof(UINT16),&busData);
 			//llogDebug("EXTERN FUNCTION CALL","CheckRecv(%u,0x%x) = %u",4*sizeof(UINT16),&busData,retValue);
 			
 			if (!retValue)
 			{
 				//wordParse(rtDescription,busData[0],busData[2],busData[1]);
-				if(busData[0] == DATA_TYPE_COMMAND_WORD && m_rtCurrentMsgCyc == 1)//RT2RT transfer, and this is the second command:Trans command
+				if(busData[0] == DATA_TYPE_COMMAND_WORD)//RT2RT transfer, and this is the second command:Trans command
 				{
 					UINT16 commandAddress = busData[1] >> 11;
 					if( commandAddress == m_rtAddress || commandAddress == 31)
 					{
 						m_rtCurrentMsgCmdWord = busData[1];
+						m_rtProcessedMsgCount --; //Trick
 						RTEndMsg();
 						RTReceiveCMD();    //Reinit the CYC count
 						RTStartMsg();
@@ -553,9 +626,11 @@ UINT16 SimRT::RTRXTransfer()
 					UINT16 dataWord = busData[1];
 					
 					UINT16 stackAddr = Reg::rtDataStackAddrReg;
-					memWrite(stackAddr,dataWord);
-					RTUpdateLookupTable(cmd);
+					llogInfo("Recv","0x%x:0x%x",stackAddr + m_rtDataIndex ,dataWord);
+
+					memWrite(stackAddr + m_rtDataIndex,dataWord);
 					
+					m_rtDataIndex++;
 				}
 				else 
 				{
@@ -591,6 +666,8 @@ UINT16 SimRT::RTEndMsg()
 	m_rtCurrentMsgCyc = 0;
 	m_rtCurrentMsgCycCount = 0;
 	Reg::rtLastCmdReg = m_rtCurrentMsgCmdWord;
+	m_rtProcessedMsgCount ++;
+	RTUpdateLookupTable(m_rtCurrentMsgCmdWord);
 	return 0;
 }
 UINT16 SimRT::RTCheckCMDType(UINT16 cmdWord)
@@ -644,6 +721,8 @@ UINT16 SimRT::RTCheckCMDType(UINT16 cmdWord)
 
 UINT16 SimRT::RTStartMsg()
 {
+	m_rtDataIndex = 0;
+	genIRQ();
 	if (Reg::configReg_1 & 0x2000) 
 	{
 		m_rtMsgBlockAddr = memRead(RT_STACK_POINTER_B_ADDR);
@@ -661,6 +740,7 @@ UINT16 SimRT::RTStartMsg()
 	if (RTLookupIllegalizationTable(m_rtCurrentMsgCmdWord)) 
 	{
 		//Command is invalid
+
 	}
 	if (RTLookupBusyTable(m_rtCurrentMsgCmdWord)) 
 	{
@@ -702,7 +782,7 @@ UINT16 SimRT::RTLoadSubaddressControlWordAndDataAddress(UINT16 cmdWord)
 	{
 		if (Reg::configReg_1 & 0x2000)
 		{
-			if (address == 31)
+			/*if (address == 31)
 			{
 				subAddressData = memRead((UINT16)(RT_BCAST_LOOKUP_TABLE_B_ADDR + subAddress));
 			}
@@ -713,11 +793,12 @@ UINT16 SimRT::RTLoadSubaddressControlWordAndDataAddress(UINT16 cmdWord)
 			else if(!t_r)
 			{
 				subAddressData = memRead((UINT16)(RT_RX_LOOKUP_TABLE_B_ADDR + subAddress));
-			}
+			}*/
+			subAddressData = memRead((UINT16)(RT_RX_LOOKUP_TABLE_B_ADDR + subAddress));
 		}
 		else
 		{
-			if (address == 31)
+			/*if (address == 31)
 			{
 				subAddressData = memRead((UINT16)(RT_BCAST_LOOKUP_TABLE_A_ADDR + subAddress));
 			}
@@ -728,7 +809,8 @@ UINT16 SimRT::RTLoadSubaddressControlWordAndDataAddress(UINT16 cmdWord)
 			else if(!t_r)
 			{
 				subAddressData = memRead((UINT16)(RT_RX_LOOKUP_TABLE_A_ADDR + subAddress));
-			}
+			}*/
+			subAddressData = memRead((UINT16)(RT_TX_LOOKUP_TABLE_A_ADDR + subAddress));
 		}
 
 		if(!m_rtCurrentMsgCyc)//This is the first init
@@ -788,7 +870,7 @@ UINT16 SimRT::RTLookupBusyTable(UINT16 cmdWord)
 {
 	if(!(Reg::configReg_1 & 0x0400))
 	{
-		Reg::rtStatusWordReg |= 0X008;
+		Reg::rtStatusWordReg |= 0X0008;
 		return 1;
 	}
 	UINT16 address=cmdWord>>11;
@@ -823,6 +905,8 @@ UINT16 SimRT::RTLookupBusyTable(UINT16 cmdWord)
 
 UINT16 SimRT::RTUpdateLookupTable(UINT16 cmd)
 {
+
+	
 	UINT16 address = cmd >> 11;
 	UINT16 subAddress=(cmd >> 5)&0X001F;
 
@@ -891,6 +975,7 @@ UINT16 SimRT::RTUpdateLookupTable(UINT16 cmd)
 		{       
 			if(isEnhanceMemManage && ((Reg::rtSubAddrCtrlWordReg&0X1C00) >> 10) >= 1) //circle buff
 			{
+				llogInfo("RTUpdateLookupTable","Trans::Circle buff");
 				if((stackAddr - stackInitAddr) == (128 - 32))
 				{
 					Reg::intStatusReg |= 0X0020;
@@ -918,6 +1003,7 @@ UINT16 SimRT::RTUpdateLookupTable(UINT16 cmd)
 
 			if (isEnhanceMemManage && ((Reg::rtSubAddrCtrlWordReg&0X00E0) >> 5 ) >= 1) //circle buff
 			{
+				llogInfo("RTUpdateLookupTable","Recv::Circle buff");
 
 				if((stackAddr - stackInitAddr) == (128 - 32))
 				{
@@ -943,6 +1029,8 @@ UINT16 SimRT::RTUpdateLookupTable(UINT16 cmd)
 			}
 			else if ((isEnhanceMemManage && isSaDoubleBuffer && (Reg::rtSubAddrCtrlWordReg&0X80E0) == 0X8000) || isSaDoubleBuffer) //double buffer
 			{
+
+				llogInfo("RTUpdateLookupTable","Recv::Double buff");
 				stackAddr ^= 0X0020;
 				Reg::rtDataStackAddrReg = stackAddr;
 				memWrite(m_rtMsgBlockAddr + 2,stackAddr);
@@ -966,6 +1054,7 @@ UINT16 SimRT::RTUpdateLookupTable(UINT16 cmd)
 UINT16 SimRT::RTReturnStatusWord()
 {
 	//llogDebug("RT","RT 0x%02x return Status Word",m_rtAddress);
+	genIRQ();
 	UINT16 cmdWord = m_rtCurrentMsgCmdWord;
 	UINT16 address=cmdWord>>11;
 	UINT16 subAddress=(cmdWord>>5)&0X001F;
@@ -1027,6 +1116,7 @@ UINT32 SimRT::OnData(UINT32 len, void * data)
 UINT16 SimRT::rtRecvImproperWord(UINT16 actualType,UINT16 expectType,UINT16 data)
 {
 	//llogDebug("RT","Receive Improper Word");
+	genIRQ();
 	if (actualType == DATA_TYPE_COMMAND_WORD)
 	{
 		UINT16 commandAddress = data >> 11;
@@ -1055,6 +1145,7 @@ UINT16 SimRT::rtRecvImproperWord(UINT16 actualType,UINT16 expectType,UINT16 data
 UINT16 SimRT::rtRecvTimeout()
 {
 	//llogDebug("RT","Receive Time out");
+	genIRQ();
 	Reg::rtStatusWordReg |= 0x0400;
 	UINT16 blockData = memRead(m_rtMsgBlockAddr);
 	blockData |= 0x1200;
@@ -1114,4 +1205,56 @@ UINT16 SimRT::configReg_5_write(UINT16 data)
 	}
 	Reg::configReg_5_write(data);
 	return 0;
+}
+
+struct TransException SimRT::checkIfException()
+{
+	struct TransException transExcep = {0,0,TimeOutException,FALSE};
+
+	UINT16 msgCount = m_rtProcessedMsgCount + 1;
+	for (UINT16 i = 0; i < 64; i++)
+	{
+		struct TransException tempExcep = Exception1553B::m_exceptionArray[i];
+		if (tempExcep.isError && tempExcep.messageIndex == msgCount)
+		{
+			
+			if(tempExcep.messageCycCount == m_rtCurrentMsgCyc) 
+			{
+				transExcep = tempExcep;
+				Exception1553B::m_exceptionArray[i].isError = FALSE;
+				break;
+			}
+			
+		}
+	}
+
+	return transExcep;
+}
+
+UINT32 SimRT::CheckRecvHook(UINT32 len,void *recvData)
+{
+	struct TransException  transExcep = checkIfException();
+	if (transExcep.isError)
+	{
+		if (transExcep.exceptionType == TimeOutException)
+		{		
+			return 1;
+
+		}
+		else 
+		{
+			(*((UINT16*)recvData + 0)) = DATA_TYPE_UNDEFINED_WORD;
+			return 0;
+		}
+	}
+	else 
+	{
+		return ::CheckRecv(len,recvData);
+	}
+	
+}
+
+void SimRT::genIRQ(void)
+{
+	GenIRQ();
 }

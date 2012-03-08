@@ -81,7 +81,7 @@ M	0x0124	0x0c02	//Msg_5 command word bc to rt1 mode without data
 M	0x0125	0x0000	//Msg_5 loop back word
 M	0x0126	0x0000	//Msg_5 status word
 M	0x0127	0x0180	//Msg_6 block control word
-M	0x0128	0x0c24	//Msg_6 command rt1 to bc
+M	0x0128	0x0424	//Msg_6 command rt1 to bc
 M	0x0129	0x0000 	//Msg_6 loop back word
 M	0x012a	0x0000	//Msg_6 status word
 M	0x012b	0x0000	//Msg_6 data word

@@ -97,7 +97,7 @@ UINT16 Reg::startResetReg_write(UINT16 data)
 		{
 			isHalted = false;
 		}
-		else if ((configReg_1 & 0XC000) == 0X4000 && !(configReg_3  & 0x8000))
+		else if (1/*(configReg_1 & 0XC000) == 0X4000 && !(configReg_3  & 0x8000)*/)
 		{
 			isHalted = false;
 		}
